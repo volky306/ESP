@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ESP32 Ovládání">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>ESP32 S3 Zero</title>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <style>
+    :root{
+      color-scheme:dark;
+      --bg:#07101f;--panel:#141d2e;--line:#263247;--muted:#94a3b8;
+      --text:#f8fafc;--green:#22c55e;--red:#ef4444;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background:linear-gradient(180deg,#07101f,#0f172a);color:var(--text);
+      display:flex;justify-content:center;padding:calc(24px + env(safe-area-inset-top)) 18px calc(30px + env(safe-area-inset-bottom));
+    }
+    main{width:min(520px,100%)}
+    h1{font-size:30px;margin:8px 0 4px}
+    .sub{color:var(--muted);margin-bottom:24px}
+    .card{
+      background:rgba(20,29,46,.96);border:1px solid var(--line);border-radius:26px;
+      padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.28);margin-bottom:16px
+    }
+    .status{display:flex;align-items:center;gap:10px;color:var(--muted)}
+    .dot{width:12px;height:12px;border-radius:50%;background:#64748b;box-shadow:0 0 0 5px rgba(100,116,139,.14)}
+    .dot.online{background:var(--green);box-shadow:0 0 0 5px rgba(34,197,94,.15)}
+    .dot.error{background:var(--red);box-shadow:0 0 0 5px rgba(239,68,68,.15)}
+    .switch-wrap{text-align:center;padding:28px 0 18px}
+    .label{font-size:15px;color:var(--muted);margin-bottom:14px}
+    .state{font-size:40px;font-weight:800;letter-spacing:.03em;margin:12px 0 20px}
+    .toggle{position:relative;width:150px;height:78px;border:0;border-radius:45px;background:#334155;cursor:pointer;transition:.25s}
+    .toggle:after{content:"";position:absolute;width:62px;height:62px;left:8px;top:8px;border-radius:50%;background:white;transition:.25s;box-shadow:0 7px 18px rgba(0,0,0,.35)}
+    .toggle.on{background:var(--green)}
+    .toggle.on:after{transform:translateX(72px)}
+    .toggle:disabled{opacity:.45}
+    details summary{cursor:pointer;font-weight:700}
+    .grid{display:grid;gap:12px;margin-top:16px}
+    label{font-size:13px;color:var(--muted)}
+    input{width:100%;margin-top:6px;padding:13px 14px;border-radius:13px;border:1px solid var(--line);background:#0d1626;color:var(--text);font-size:16px}
+    .btn{width:100%;padding:14px;border:0;border-radius:14px;font-weight:750;font-size:16px;color:#07110b;background:var(--green)}
+    .small{font-size:12px;color:var(--muted);line-height:1.5;margin-top:12px}
+    #log{white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px;color:#cbd5e1;max-height:150px;overflow:auto}
+  </style>
+</head>
+<body>
+<main>
+  <h1>ESP32 S3 Zero</h1>
+  <div class="sub">Ovládání přes HiveMQ Cloud</div>
+
+  <section class="card">
+    <div class="status"><span id="dot" class="dot"></span><span id="connectionText">Nepřipojeno</span></div>
+    <div class="switch-wrap">
+      <div class="label">Výstup</div>
+      <div id="stateText" class="state">NEZNÁMÝ</div>
+      <button id="toggle" class="toggle" aria-label="Přepnout výstup" disabled></button>
+    </div>
+  </section>
+
+  <section class="card">
+    <details id="settings" open>
+      <summary>Nastavení připojení</summary>
+      <div class="grid">
+        <label>Host<input id="host" value="89822fc29ad54e769b0ab5ae1ca8f0d0.s1.eu.hivemq.cloud"></label>
+        <label>WebSocket port<input id="port" value="8884" inputmode="numeric"></label>
+        <label>Uživatelské jméno<input id="username" value="Michal" autocomplete="username"></label>
+        <label>Heslo<input id="password" type="password" autocomplete="current-password" placeholder="MQTT heslo"></label>
+        <label>Téma příkazu<input id="commandTopic" value="michal/s3zero/tlacitko"></label>
+        <label>Téma skutečného stavu<input id="stateTopic" value="michal/s3zero/stav"></label>
+        <button id="connect" class="btn">Připojit</button>
+      </div>
+      <div class="small">Přihlašovací údaje jsou uložené pouze v tomto zařízení.</div>
+    </details>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>Diagnostika</summary>
+      <div id="log"></div>
+    </details>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fields = ["host","port","username","password","commandTopic","stateTopic"];
+  let client = null, actualState = null;
+
+  fields.forEach(id => {
+    const saved = localStorage.getItem("mqtt_" + id);
+    if (saved !== null) $(id).value = saved;
+  });
+
+  function log(text){
+    const t = new Date().toLocaleTimeString("cs-CZ");
+    $("log").textContent = `[${t}] ${text}\n` + $("log").textContent;
+  }
+  function setConnection(mode,text){
+    $("dot").className = "dot" + (mode ? " " + mode : "");
+    $("connectionText").textContent = text;
+    $("toggle").disabled = mode !== "online";
+  }
+  function showState(value){
+    actualState = value;
+    const on = value === true;
+    $("toggle").classList.toggle("on", on);
+    $("stateText").textContent = value === null ? "NEZNÁMÝ" : (on ? "ZAPNUTO" : "VYPNUTO");
+    $("stateText").style.color = value === null ? "#f8fafc" : (on ? "#22c55e" : "#ef4444");
+  }
+  function connect(){
+    if(client){ try{client.end(true)}catch(e){} }
+    fields.forEach(id => {
+      const value = id === "password" ? $(id).value : $(id).value.trim();
+      localStorage.setItem("mqtt_" + id, value);
+    });
+    const url = `wss://${$("host").value.trim()}:${$("port").value.trim()}/mqtt`;
+    setConnection("", "Připojuji…");
+    log("Připojuji k " + url);
+
+    client = mqtt.connect(url,{
+      clientId:"iphone_"+Math.random().toString(16).slice(2,10),
+      username:$("username").value.trim(),
+      password:$("password").value,
+      clean:true, connectTimeout:10000, reconnectPeriod:3000, keepalive:30
+    });
+
+    client.on("connect",()=>{
+      setConnection("online","Připojeno");
+      $("settings").open=false;
+      const topic=$("stateTopic").value.trim();
+      client.subscribe(topic,{qos:0},err=>log(err ? "Chyba odběru: "+err.message : "Odebírám: "+topic));
+    });
+    client.on("message",(topic,payload)=>{
+      const msg=payload.toString().trim().toUpperCase();
+      log(`${topic} = ${msg}`);
+      if(topic === $("stateTopic").value.trim()){
+        if(msg==="ON"||msg==="1") showState(true);
+        if(msg==="OFF"||msg==="0") showState(false);
+      }
+    });
+    client.on("reconnect",()=>setConnection("","Obnovuji spojení…"));
+    client.on("offline",()=>setConnection("","Offline"));
+    client.on("error",err=>{setConnection("error","Chyba připojení");log("Chyba: "+err.message)});
+  }
+
+  $("connect").addEventListener("click",connect);
+  $("toggle").addEventListener("click",()=>{
+    if(!client || !client.connected) return;
+    const next=actualState===true ? "OFF" : "ON";
+    const topic=$("commandTopic").value.trim();
+    client.publish(topic,next,{qos:0,retain:true},err=>log(err ? "Chyba odeslání: "+err.message : `Odesláno: ${topic} = ${next}`));
+  });
+
+  showState(null);
+
+  // Když je heslo už uložené, po otevření aplikace se připojí automaticky.
+  if (localStorage.getItem("mqtt_password")) {
+    setTimeout(connect, 400);
+  }
+
+  if("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js?v=2");
+})();
+</script>
+</body>
+</html>
